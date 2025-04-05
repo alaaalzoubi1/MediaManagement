@@ -5,8 +5,10 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Http;
+using Volo.Abp;
 using Volo.Abp.Application.Dtos;
 using Volo.Abp.Application.Services;
+using Volo.Abp.BlobStoring;
 using Volo.Abp.Content;
 using Volo.Abp.Domain.Repositories;
 using Volo.Abp.Users;
@@ -20,13 +22,14 @@ namespace MediaManagement.Medias
         private readonly IRepository<Media, Guid> _repository;
         private readonly IHostEnvironment _environment;
         private readonly ICurrentUser _currentUser;
-
-        public MediaAppService(IRepository<Media, Guid> repository, IHostEnvironment environment, ICurrentUser currentUser)
+        private readonly IBlobContainer _blobContainer;
+        public MediaAppService(IRepository<Media, Guid> repository, IHostEnvironment environment, ICurrentUser currentUser, IBlobContainer blobContainer)
             : base(repository)
         {
             _repository = repository;
             _environment = environment;
             _currentUser = currentUser;
+            _blobContainer = blobContainer;
         }
 
 
@@ -40,33 +43,37 @@ namespace MediaManagement.Medias
 
         public async Task<MediaDto> UploadVideoAsync(Guid mediaId, IFormFile video)
         {
+            var media = await _repository.FindAsync(mediaId);
+            if (media == null)
+                throw new UserFriendlyException("Media not found.");
+
             if (video == null || video.Length == 0)
-                throw new ArgumentException("Invalid video file.");
+                throw new UserFriendlyException("A video file must be provided.");
 
-            if (!_currentUser.IsAuthenticated)
-                throw new UnauthorizedAccessException("User is not authenticated.");
+            var blobName = $"{Guid.NewGuid()}_{video.FileName}";
+            await _blobContainer.SaveAsync(blobName, video.OpenReadStream(), overrideExisting: true);
 
-            var fileName = $"{Guid.NewGuid()}_{video.FileName}";
-            var uploadPath = Path.Combine(_environment.ContentRootPath, "uploads/videos");
-
-            if (!Directory.Exists(uploadPath))
-                Directory.CreateDirectory(uploadPath);
-
-            var filePath = Path.Combine(uploadPath, fileName);
-
-            using (var stream = new FileStream(filePath, FileMode.Create))
-            {
-                await video.CopyToAsync(stream);
-            }
-
-            var media = await _repository.GetAsync(mediaId);
-
+            media.Video = blobName;
             await _repository.UpdateAsync(media);
-            media.Video = filePath;
+
             return ObjectMapper.Map<Media, MediaDto>(media);
         }
 
+
         
+        // public async Task<IRemoteStreamContent> DownloadVideoAsync(Guid mediaId)
+        // {
+        //     var media = await _repository.GetAsync(mediaId);
+        //     if (media == null || string.IsNullOrEmpty(media.Video))
+        //     {
+        //         throw new FileNotFoundException("Video not found.");
+        //     }
+        //
+        //     var stream = File.OpenRead(media.Video);
+        //     var fileName = Path.GetFileName(media.Video);
+        //
+        //     return new RemoteStreamContent(stream, fileName, "video/mp4");
+        // }
         public async Task<IRemoteStreamContent> DownloadVideoAsync(Guid mediaId)
         {
             var media = await _repository.GetAsync(mediaId);
@@ -75,10 +82,12 @@ namespace MediaManagement.Medias
                 throw new FileNotFoundException("Video not found.");
             }
 
-            var stream = File.OpenRead(media.Video);
+            var stream = await _blobContainer.GetAsync(media.Video);
             var fileName = Path.GetFileName(media.Video);
 
             return new RemoteStreamContent(stream, fileName, "video/mp4");
         }
+
+
     }
 }
